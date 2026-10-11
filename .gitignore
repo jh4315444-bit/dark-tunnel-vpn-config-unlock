@@ -1,34 +1,18 @@
-# IntelliJ / Android Studio
 *.iml
-.idea/
-.gradle/
-.kotlin/
-
-# Build & Output Directories
-/build/
-/app/build/
-/.build-outputs/
-/.aistudio/
-/captures/
-.externalNativeBuild/
-.cxx/
-
-# Local Configuration & Environment Secrets (NEVER COMMIT)
-local.properties
+.gradle
+.kotlin
 /local.properties
-.env
-*.env
-
-# Keystores, Signing Keys & Private Credentials (NEVER COMMIT)
-debug.keystore
-debug.keystore.base64
-*.jks
-*.keystore
-*.pem
-*.pk8
-*.p12
-*.key
-
-# OS Metadata
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
 .DS_Store
-Thumbs.db
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+.env
+debug.keystore
