@@ -416,6 +416,7 @@ fun DarkTunnelWorkbenchApp(viewModel: DarkTunnelViewModel) {
                         onExportUnlocked = { text ->
                             triggerExport(text.toByteArray(Charsets.UTF_8), "unlocked_config.json")
                         },
+                        onApplyToVpn = { text -> viewModel.applyConfigTextToVpnModule(text) },
                         onShowMessage = { viewModel.showBanner(it) }
                     )
 
@@ -429,6 +430,7 @@ fun DarkTunnelWorkbenchApp(viewModel: DarkTunnelViewModel) {
                         onExportDecoded = { text ->
                             triggerExport(text.toByteArray(Charsets.UTF_8), "decoded_config.json")
                         },
+                        onApplyToVpn = { text -> viewModel.applyConfigTextToVpnModule(text) },
                         onNavigate = { viewModel.navigateTo(it) },
                         onShowMessage = { viewModel.showBanner(it) }
                     )

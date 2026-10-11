@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -43,7 +44,6 @@ import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusBadge
 import com.example.ui.theme.CrimsonError
 import com.example.ui.theme.ElectricAmber
-import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonGreen
 import com.example.ui.theme.ObsidianDeep
@@ -58,6 +58,7 @@ fun DecoderScreen(
     onLoadSampleEncoded: () -> Unit,
     onSendToEditor: () -> Unit,
     onExportDecoded: (String) -> Unit,
+    onApplyToVpn: (String) -> Unit,
     onNavigate: (WorkbenchDestination) -> Unit,
     onShowMessage: (String) -> Unit
 ) {
@@ -75,25 +76,8 @@ fun DecoderScreen(
             SectionHeader(
                 icon = Icons.Default.Code,
                 title = "Config Decoder",
-                subtitle = "Multi-layer Base64, Hexadecimal, URL-Encoding & VPN URI Dissector"
+                subtitle = "Deep Unpacker for Base64, Hex, GZIP/ZLIB & VPN URIs into Clear Readable Text"
             )
-        }
-
-        // Encoding vs Encryption Technical Notice
-        item {
-            CyberCard(accentColor = ElectricAmber) {
-                Text(
-                    text = "Encoding vs. Encryption Boundary",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = ElectricAmber
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "This module decodes documented data representations (Base64, Hex, URL-Encoding, VMess/VLESS/Trojan/SS URIs). It never treats encoding as encryption or claims that AES-encrypted payloads can be decoded without their decryption key.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
         }
 
         // Encoded Input Card
@@ -105,7 +89,7 @@ fun DecoderScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Encoded Input Payload",
+                        text = "Encoded / Raw Config Input",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
@@ -123,7 +107,7 @@ fun DecoderScreen(
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = onInputChange,
-                    label = { Text("Paste Base64, Hex, or vmess:// / vless:// / darktunnel:// URI") },
+                    label = { Text("Paste Base64, Hex, or vmess:// / vless:// / darktunnel:// / ssh:// URI") },
                     minLines = 4,
                     maxLines = 8,
                     modifier = Modifier
@@ -146,12 +130,12 @@ fun DecoderScreen(
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Inspect & Decode Payload", fontWeight = FontWeight.Bold)
+                    Text("Decode & Show All Clear Parameters", fontWeight = FontWeight.Bold)
                 }
             }
         }
 
-        // Decode Result Card
+        // Decode Result Card with Clear Parameter Inspector Table
         if (decodeResult != null) {
             item {
                 val accent = when {
@@ -168,7 +152,7 @@ fun DecoderScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Decoding Pipeline Output",
+                                text = "Clear Decoded Config Inspector",
                                 style = MaterialTheme.typography.titleLarge,
                                 color = accent
                             )
@@ -181,7 +165,7 @@ fun DecoderScreen(
                         StatusBadge(
                             text = when {
                                 decodeResult.isEncryptedAndNeedsKey -> "KEY REQUIRED"
-                                decodeResult.isSuccessful -> "DECODED"
+                                decodeResult.isSuccessful -> "CLEAR & READABLE"
                                 else -> "UNRECOGNIZED"
                             },
                             color = accent
@@ -191,7 +175,7 @@ fun DecoderScreen(
                     if (decodeResult.isEncryptedAndNeedsKey) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "This payload is an encrypted container, not a simple encoding. Open the Config Unlocker and supply the decryption key.",
+                            text = "This file is an AES-256 encrypted container. Open the Config Unlocker and enter the decryption password to reveal all clear fields.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = ElectricAmber
                         )
@@ -207,11 +191,29 @@ fun DecoderScreen(
                         }
                     }
 
-                    // Step trace
+                    // 1. Clear Extracted Configuration Parameters Table
+                    if (decodeResult.parsedFields.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "Unlocked / Decoded VPN Settings (Tap to Copy):",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = NeonGreen
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        ClearConfigParametersTable(
+                            fields = decodeResult.parsedFields,
+                            onCopyValue = { label, value ->
+                                clipboard.setText(AnnotatedString(value))
+                                onShowMessage("Copied $label: $value")
+                            }
+                        )
+                    }
+
+                    // 2. Step trace
                     if (decodeResult.steps.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "Transformation Trace:",
+                            text = "Decoding Layers Applied:",
                             style = MaterialTheme.typography.labelLarge,
                             color = NeonCyan
                         )
@@ -226,7 +228,7 @@ fun DecoderScreen(
                             ) {
                                 Column(modifier = Modifier.padding(10.dp)) {
                                     Text(
-                                        text = "Step ${step.stepIndex}: ${step.encodingType}",
+                                        text = "Layer ${step.stepIndex}: ${step.encodingType}",
                                         fontWeight = FontWeight.Bold,
                                         style = MaterialTheme.typography.labelMedium,
                                         color = NeonGreen
@@ -241,56 +243,16 @@ fun DecoderScreen(
                         }
                     }
 
-                    // Extracted Configuration Fields
-                    if (decodeResult.parsedFields.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "Detected Configuration Parameters:",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = NeonGreen
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                decodeResult.parsedFields.forEach { (k, v) ->
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = k,
-                                            fontFamily = JetBrainsMonoFontFamily,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = NeonCyan
-                                        )
-                                        Text(
-                                            text = v,
-                                            fontFamily = JetBrainsMonoFontFamily,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
+                    // 3. Full Formatted Inspector Report & Clean JSON/Text
+                    Spacer(modifier = Modifier.height(14.dp))
                     Text(
-                        text = "Decoded Output Viewer:",
-                        style = MaterialTheme.typography.labelLarge,
+                        text = "Complete Readable Configuration Text:",
+                        style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     CodePreviewBox(
-                        code = decodeResult.finalOutput,
+                        code = decodeResult.formattedInspectorReport.ifBlank { decodeResult.finalOutput },
                         modifier = Modifier.testTag("decoded_output_box")
                     )
 
@@ -301,14 +263,14 @@ fun DecoderScreen(
                     ) {
                         OutlinedButton(
                             onClick = {
-                                clipboard.setText(AnnotatedString(decodeResult.finalOutput))
-                                onShowMessage("Decoded payload copied to clipboard.")
+                                clipboard.setText(AnnotatedString(decodeResult.formattedInspectorReport.ifBlank { decodeResult.finalOutput }))
+                                onShowMessage("Copied clear configuration report to clipboard.")
                             },
                             modifier = Modifier.weight(1f).testTag("decoder_copy_button")
                         ) {
                             Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Copy")
+                            Text("Copy All")
                         }
                         OutlinedButton(
                             onClick = { onExportDecoded(decodeResult.finalOutput) },
@@ -320,12 +282,25 @@ fun DecoderScreen(
                         }
                         Button(
                             onClick = onSendToEditor,
-                            colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = ObsidianDeep),
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = ObsidianDeep),
                             modifier = Modifier.weight(1f).testTag("decoder_open_editor_button")
                         ) {
                             Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Editor", fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    if (decodeResult.isSuccessful) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { onApplyToVpn(decodeResult.finalOutput) },
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = ObsidianDeep),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.VpnLock, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Load Decoded Settings into VPN Connection", fontWeight = FontWeight.Bold)
                         }
                     }
                 }

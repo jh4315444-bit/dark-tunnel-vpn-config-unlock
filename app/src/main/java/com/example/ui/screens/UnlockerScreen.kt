@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
@@ -23,13 +24,16 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -73,10 +77,11 @@ fun UnlockerScreen(
     onLoadSampleCorrupted: () -> Unit,
     onNavigate: (WorkbenchDestination) -> Unit,
     onExportUnlocked: (String) -> Unit,
+    onApplyToVpn: (String) -> Unit,
     onShowMessage: (String) -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
-    var showPassword by remember { mutableStateOf(false) }
+    var showPassword by remember { mutableStateOf(true) }
 
     LazyColumn(
         modifier = Modifier
@@ -90,7 +95,7 @@ fun UnlockerScreen(
             SectionHeader(
                 icon = Icons.Default.LockOpen,
                 title = "Config Unlocker",
-                subtitle = "Authentic AES-256-GCM / CBC & PBKDF2-HMAC-SHA256 container decryption"
+                subtitle = "Unlock encrypted or compressed VPN configs to see all clear server, port, SNI & payload details"
             )
         }
 
@@ -105,7 +110,7 @@ fun UnlockerScreen(
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Import a compatible encrypted configuration (.dark, .hat, .ehi, .nm, .hc, .json) or load the authorized diagnostic sample below.",
+                        text = "Import any VPN config (.dark, .hat, .ehi, .nm, .hc, .json) or tap 'Load Sample .dark' below to immediately see all unlocked configuration text clearly.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -202,7 +207,7 @@ fun UnlockerScreen(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Enter the exact password or key used to encrypt the container. Never fakes success—AES-GCM authentication tags and SHA-256 digests are verified cryptographically.",
+                    text = "Enter the password for encrypted containers, or press Unlock directly for compressed/encoded files to reveal all clear settings.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -211,7 +216,7 @@ fun UnlockerScreen(
                 OutlinedTextField(
                     value = passwordInput,
                     onValueChange = onPasswordChange,
-                    label = { Text("Password or Decryption Key") },
+                    label = { Text("Password or Decryption Key (if locked)") },
                     placeholder = { Text("e.g. DarkTunnel#2026") },
                     singleLine = true,
                     visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
@@ -246,12 +251,12 @@ fun UnlockerScreen(
                 ) {
                     Icon(Icons.Default.LockOpen, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Verify & Unlock Configuration", fontWeight = FontWeight.Bold)
+                    Text("Unlock & Show All Clear Config Data", fontWeight = FontWeight.Bold)
                 }
             }
         }
 
-        // Actual Cryptographic Operation Result
+        // Actual Cryptographic Operation Result with Crystal-Clear Parameter Breakdown
         if (unlockResult != null) {
             item {
                 when (unlockResult) {
@@ -267,12 +272,12 @@ fun UnlockerScreen(
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Column {
                                     Text(
-                                        text = "Cryptographic Unlock Succeeded",
+                                        text = "Unlocked — Clear Configuration Inspector",
                                         style = MaterialTheme.typography.titleLarge,
                                         color = NeonGreen
                                     )
                                     Text(
-                                        text = "${unlockResult.cipherSuiteUsed} • ${unlockResult.kdfIterations} PBKDF2 Iterations",
+                                        text = "${unlockResult.cipherSuiteUsed} • 100% Readable Output",
                                         fontFamily = JetBrainsMonoFontFamily,
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -280,8 +285,32 @@ fun UnlockerScreen(
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(12.dp))
-                            CodePreviewBox(code = unlockResult.decryptedContent)
+                            // 1. Highlighted Clear Key-Value Table (Server, Port, SNI, Payload, Username, etc.)
+                            if (unlockResult.parsedFields.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Text(
+                                    text = "Extracted VPN Parameters (Tap any row to copy):",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = NeonCyan
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                ClearConfigParametersTable(
+                                    fields = unlockResult.parsedFields,
+                                    onCopyValue = { label, value ->
+                                        clipboard.setText(AnnotatedString(value))
+                                        onShowMessage("Copied $label: $value")
+                                    }
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = "Full Unlocked Inspector Report & Readable Config:",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            CodePreviewBox(code = unlockResult.formattedInspectorReport)
                             Spacer(modifier = Modifier.height(12.dp))
 
                             Row(
@@ -290,14 +319,14 @@ fun UnlockerScreen(
                             ) {
                                 OutlinedButton(
                                     onClick = {
-                                        clipboard.setText(AnnotatedString(unlockResult.decryptedContent))
-                                        onShowMessage("Copied unlocked configuration to clipboard.")
+                                        clipboard.setText(AnnotatedString(unlockResult.formattedInspectorReport))
+                                        onShowMessage("Copied full unlocked report to clipboard.")
                                     },
                                     modifier = Modifier.weight(1f).testTag("copy_unlocked_button")
                                 ) {
                                     Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Copy")
+                                    Text("Copy All")
                                 }
                                 OutlinedButton(
                                     onClick = { onExportUnlocked(unlockResult.decryptedContent) },
@@ -305,7 +334,7 @@ fun UnlockerScreen(
                                 ) {
                                     Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Export")
+                                    Text("Save File")
                                 }
                                 Button(
                                     onClick = { onNavigate(WorkbenchDestination.EDITOR) },
@@ -316,6 +345,17 @@ fun UnlockerScreen(
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text("Editor", fontWeight = FontWeight.Bold)
                                 }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(
+                                onClick = { onApplyToVpn(unlockResult.decryptedContent) },
+                                colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = ObsidianDeep),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Default.VpnLock, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Use Unlocked Config in VPN Connection", fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -366,6 +406,65 @@ fun UnlockerScreen(
 
         item {
             Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+fun ClearConfigParametersTable(
+    fields: Map<String, String>,
+    onCopyValue: (String, String) -> Unit
+) {
+    // Filter out internal duplicate test key 'add' if 'Server Host / IP' is already present
+    val displayEntries = fields.entries.filterNot { (k, _) ->
+        k == "add" && (fields.containsKey("Server Host / IP") || fields.containsKey("Server Host"))
+    }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+        border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.4f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            displayEntries.forEachIndexed { index, (label, value) ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = label.uppercase(),
+                            fontFamily = JetBrainsMonoFontFamily,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = NeonCyan,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = value,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = NeonGreen,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    IconButton(onClick = { onCopyValue(label, value) }) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "Copy $label",
+                            tint = NeonCyan,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+                if (index < displayEntries.lastIndex) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                }
+            }
         }
     }
 }

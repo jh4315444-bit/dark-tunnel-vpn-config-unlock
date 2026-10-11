@@ -212,7 +212,6 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
 
     init {
         viewModelScope.launch {
-            // Seed default authorized diagnostic password hint if empty so users can test Password Recovery right away
             database.dao().getAllPasswordHints().collect { hints ->
                 if (hints.isEmpty()) {
                     repository.addPasswordHint(
@@ -251,7 +250,12 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
                     ?: uri.lastPathSegment?.substringAfterLast('/')
                     ?: "imported_config.dark"
 
-                processImportedBytes(resolvedName, rawBytes)
+                val report = processImportedBytes(resolvedName, rawBytes)
+                if (!report.requiresPasswordKey && report.canDirectDecode) {
+                    showBanner("File imported & decoded! All configuration parameters are ready to view.")
+                } else if (report.requiresPasswordKey) {
+                    showBanner("Encrypted file imported ($resolvedName). Enter password in Unlocker to view clear text.")
+                }
             } catch (e: Exception) {
                 showBanner("Failed to import file: ${e.message}")
                 repository.logOperation("IMPORT", displayNameHint ?: "URI", "FAILED", "IO Error: ${e.message}")
@@ -270,14 +274,23 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
                         val bytes = ConfigGeneratorEngine.buildAuthorizedSampleEncryptedDarkFile("DarkTunnel#2026")
                         processImportedBytes("authorized_sample_locked.dark", bytes)
                         _unlockPasswordInput.value = "DarkTunnel#2026"
-                        showBanner("Loaded encrypted sample (.dark) and created backup. Key: DarkTunnel#2026")
+                        // Also auto-unlock the sample so the user immediately sees the clear output!
+                        val res = withContext(Dispatchers.Default) {
+                            ConfigCryptoEngine.unlockContainer(bytes, "DarkTunnel#2026")
+                        }
+                        _unlockResult.value = res
+                        if (res is UnlockOperationResult.Success) {
+                            _editorFileName.value = "authorized_sample_unlocked.json"
+                            _editorOriginalContent.value = res.decryptedContent
+                            _editorContent.value = res.decryptedContent
+                        }
+                        showBanner("Loaded & unlocked sample (.dark) with key: DarkTunnel#2026")
                     }
                     "ENCODED_VMESS" -> {
                         val payload = ConfigGeneratorEngine.buildAuthorizedSampleEncodedPayload()
                         val bytes = payload.toByteArray(StandardCharsets.UTF_8)
                         processImportedBytes("sample_encoded_uri.ehi", bytes)
-                        _decoderInputText.value = payload
-                        showBanner("Loaded Base64 VMess URI sample (.ehi) for decoding.")
+                        showBanner("Loaded & decoded VMess URI sample (.ehi) into clear parameters.")
                     }
                     "CORRUPTED_SAMPLE" -> {
                         val brokenBytes = "{ \"magic\": \"DARK_TUNNEL\", \"ciphertext\": \"!!CORRUPTED_STREAM".toByteArray(StandardCharsets.UTF_8)
@@ -309,9 +322,18 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
             _activeFileBuffer.value = buffer
             _unlockResult.value = null
 
-            // Pre-populate decoder or editor if readable/encoded
-            if (report.formatState == ConfigFormatState.ENCODED_TEXT) {
-                _decoderInputText.value = String(rawBytes, StandardCharsets.UTF_8)
+            // Automatically run deep decompression + multi-layer decoding so the user never sees garbled bytes
+            val decodedFromBytes = ConfigCryptoEngine.decodePayloadFromBytes(rawBytes)
+            val cleanInputForDecoder = ConfigCryptoEngine.cleanAndSanitizePrintableText(
+                ConfigCryptoEngine.tryDecompressContainerBytes(rawBytes).first
+            )
+            _decoderInputText.value = cleanInputForDecoder
+            _decodeResult.value = decodedFromBytes
+
+            if (!report.requiresPasswordKey && decodedFromBytes.isSuccessful && decodedFromBytes.finalOutput.isNotBlank()) {
+                _editorFileName.value = fileName.substringBeforeLast('.') + "_decoded.json"
+                _editorOriginalContent.value = decodedFromBytes.finalOutput
+                _editorContent.value = decodedFromBytes.finalOutput
             } else if (report.formatState == ConfigFormatState.READABLE_JSON_OR_TEXT) {
                 val text = String(rawBytes, StandardCharsets.UTF_8)
                 _editorFileName.value = fileName
@@ -329,8 +351,8 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
                     detectedState = report.formatState.name,
                     algorithmSummary = report.detectedContainerSignature,
                     backupFilePath = backupFile.absolutePath,
-                    unlockedContent = if (report.formatState == ConfigFormatState.READABLE_JSON_OR_TEXT) {
-                        String(rawBytes, StandardCharsets.UTF_8)
+                    unlockedContent = if (!report.requiresPasswordKey && decodedFromBytes.isSuccessful) {
+                        decodedFromBytes.finalOutput
                     } else null
                 )
             )
@@ -357,6 +379,9 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
                     backupFilePath = record.backupFilePath,
                     analysisReport = report
                 )
+                val decoded = ConfigCryptoEngine.decodePayloadFromBytes(bytes)
+                _decoderInputText.value = ConfigCryptoEngine.cleanAndSanitizePrintableText(bytes)
+                _decodeResult.value = decoded
                 _unlockResult.value = null
                 showBanner("Restored ${record.fileName} from immutable backup.")
             } else {
@@ -394,13 +419,18 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
                     _editorFileName.value = current.fileName.substringBeforeLast('.') + "_unlocked.json"
                     _editorOriginalContent.value = result.decryptedContent
                     _editorContent.value = result.decryptedContent
+                    // Also sync to Decoder so both screens show the clear unlocked fields
+                    _decoderInputText.value = result.decryptedContent
+                    _decodeResult.value = withContext(Dispatchers.Default) {
+                        ConfigCryptoEngine.decodePayload(result.decryptedContent)
+                    }
                     repository.logOperation(
                         category = "UNLOCK",
                         targetName = current.fileName,
                         status = "SUCCESS",
-                        details = "Unlocked via ${result.cipherSuiteUsed} (${result.kdfIterations} iterations)."
+                        details = "Unlocked via ${result.cipherSuiteUsed} (${result.parsedFields.size} parameters extracted)."
                     )
-                    showBanner("Configuration unlocked and verified! Loaded into Config Editor.")
+                    showBanner("Unlocked! All configuration parameters are now clearly visible below.")
                 }
                 is UnlockOperationResult.Failure -> {
                     repository.logOperation(
@@ -448,9 +478,19 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             _isProcessing.value = true
             val res = withContext(Dispatchers.Default) {
-                ConfigCryptoEngine.decodePayload(input)
+                val active = _activeFileBuffer.value
+                if (active != null && input.isBlank()) {
+                    ConfigCryptoEngine.decodePayloadFromBytes(active.rawBytes)
+                } else {
+                    ConfigCryptoEngine.decodePayload(input)
+                }
             }
             _decodeResult.value = res
+            if (res.isSuccessful && res.finalOutput.isNotBlank()) {
+                _editorFileName.value = "decoded_profile.json"
+                _editorOriginalContent.value = res.finalOutput
+                _editorContent.value = res.finalOutput
+            }
             repository.logOperation(
                 category = "DECODE",
                 targetName = "Decoder Payload (${input.length} chars)",
@@ -468,7 +508,7 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
             _editorOriginalContent.value = decoded
             _editorContent.value = decoded
             _currentDestination.value = WorkbenchDestination.EDITOR
-            showBanner("Opened decoded configuration in Config Editor.")
+            showBanner("Opened clear decoded configuration in Config Editor.")
         }
     }
 
@@ -533,7 +573,7 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
                 _editorFileName.value = active.fileName.substringBeforeLast('.') + "_recovered.json"
                 _editorOriginalContent.value = report.decryptedPayload
                 _editorContent.value = report.decryptedPayload
-                showBanner("Password recovered (${report.recoveredPassword})! Decrypted payload loaded into Editor.")
+                showBanner("Password recovered (${report.recoveredPassword})! Full configuration unlocked.")
             }
             _isProcessing.value = false
         }
@@ -587,7 +627,6 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
             }
             _generatedBundle.value = bundle
 
-            // Save template to Room
             val port = current.serverPortText.trim().toIntOrNull() ?: current.protocol.defaultPort
             repository.saveTemplate(
                 SavedTemplateEntity(
@@ -612,7 +651,6 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
                 details = "Generated ${current.protocol.displayName} (${if (isVerified) "Tested & Connectable" else "Template Only"})."
             )
 
-            // Also populate editor and VPN connection parameters for seamless workflow
             _editorFileName.value = "${current.profileName.replace(" ", "_").lowercase()}.json"
             _editorOriginalContent.value = bundle.readableJson
             _editorContent.value = bundle.readableJson
@@ -807,35 +845,34 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun applyEditorConfigToVpnModule() {
-        val text = _editorContent.value.trim()
-        try {
-            val json = JSONObject(text)
-            val host = json.optString("serverHost", json.optString("add", json.optString("server", "")))
-            val port = json.optInt("serverPort", json.optInt("port", 443))
-            val name = json.optString("name", json.optString("ps", _editorFileName.value))
-            val proto = json.optString("protocol", "SSH_WS_TLS")
-            val user = json.optString("username", json.optString("id", ""))
-            val sni = json.optJSONObject("tls")?.optString("sni", "") ?: json.optString("sni", "")
-            val wsPath = json.optJSONObject("websocket")?.optString("path", "/ws") ?: json.optString("path", "/ws")
+    fun applyConfigTextToVpnModule(rawJsonOrText: String) {
+        val fields = ConfigCryptoEngine.extractReadableConfigFields(rawJsonOrText)
+        val host = fields["Server Host / IP"] ?: fields["Server Host"] ?: fields["add"] ?: ""
+        val port = (fields["Server Port"] ?: "443").toIntOrNull() ?: 443
+        val name = fields["Profile Name"] ?: _editorFileName.value
+        val proto = fields["Protocol"] ?: "SSH_WS_TLS"
+        val user = fields["Username / UUID"] ?: fields["Username"] ?: ""
+        val sni = fields["TLS SNI Host"] ?: ""
+        val wsPath = fields["WebSocket Path"] ?: "/ws"
 
-            _vpnParams.value = VpnConnectionParams(
-                profileName = name,
-                protocol = proto,
-                serverHost = host,
-                serverPort = port,
-                username = user,
-                sniHost = sni,
-                wsPath = wsPath,
-                primaryDns = settingsState.value.customDnsPrimary,
-                secondaryDns = settingsState.value.customDnsSecondary,
-                mtu = settingsState.value.vpnMtu
-            )
-            _currentDestination.value = WorkbenchDestination.VPN_CONNECTION
-            showBanner("Applied configuration '$name' to VPN Connection Module.")
-        } catch (e: Exception) {
-            showBanner("Could not parse JSON fields for VPN module: ${e.message}")
-        }
+        _vpnParams.value = VpnConnectionParams(
+            profileName = name,
+            protocol = proto,
+            serverHost = host,
+            serverPort = port,
+            username = user,
+            sniHost = sni,
+            wsPath = wsPath,
+            primaryDns = settingsState.value.customDnsPrimary,
+            secondaryDns = settingsState.value.customDnsSecondary,
+            mtu = settingsState.value.vpnMtu
+        )
+        _currentDestination.value = WorkbenchDestination.VPN_CONNECTION
+        showBanner("Applied unlocked config '$name' ($host:$port) to VPN Connection Module.")
+    }
+
+    fun applyEditorConfigToVpnModule() {
+        applyConfigTextToVpnModule(_editorContent.value)
     }
 
     // 7. VPN Connection Module
