@@ -191,13 +191,61 @@ fun DecoderScreen(
                         }
                     }
 
-                    // 1. Clear Extracted Configuration Parameters Table
+                    // 1. Clean Formatted JSON Code Viewer right at the top
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text(
+                        text = "Decoded Clean JSON Configuration:",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = NeonGreen
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    CodePreviewBox(
+                        code = decodeResult.formattedInspectorReport.ifBlank { decodeResult.finalOutput },
+                        modifier = Modifier.testTag("decoded_output_box")
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                clipboard.setText(AnnotatedString(decodeResult.formattedInspectorReport.ifBlank { decodeResult.finalOutput }))
+                                onShowMessage("Copied clean JSON configuration to clipboard.")
+                            },
+                            modifier = Modifier.weight(1f).testTag("decoder_copy_button")
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Copy JSON")
+                        }
+                        OutlinedButton(
+                            onClick = { onExportDecoded(decodeResult.finalOutput) },
+                            modifier = Modifier.weight(1f).testTag("decoder_export_button")
+                        ) {
+                            Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Save As")
+                        }
+                        Button(
+                            onClick = onSendToEditor,
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = ObsidianDeep),
+                            modifier = Modifier.weight(1f).testTag("decoder_open_editor_button")
+                        ) {
+                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Editor", fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    // 2. Clear Extracted Configuration Parameters Table
                     if (decodeResult.parsedFields.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
                             text = "Unlocked / Decoded VPN Settings (Tap to Copy):",
                             style = MaterialTheme.typography.titleMedium,
-                            color = NeonGreen
+                            color = NeonCyan
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         ClearConfigParametersTable(
@@ -209,7 +257,7 @@ fun DecoderScreen(
                         )
                     }
 
-                    // 2. Step trace
+                    // 3. Step trace
                     if (decodeResult.steps.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
@@ -243,56 +291,8 @@ fun DecoderScreen(
                         }
                     }
 
-                    // 3. Full Formatted Inspector Report & Clean JSON/Text
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text(
-                        text = "Complete Readable Configuration Text:",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    CodePreviewBox(
-                        code = decodeResult.formattedInspectorReport.ifBlank { decodeResult.finalOutput },
-                        modifier = Modifier.testTag("decoded_output_box")
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                clipboard.setText(AnnotatedString(decodeResult.formattedInspectorReport.ifBlank { decodeResult.finalOutput }))
-                                onShowMessage("Copied clear configuration report to clipboard.")
-                            },
-                            modifier = Modifier.weight(1f).testTag("decoder_copy_button")
-                        ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Copy All")
-                        }
-                        OutlinedButton(
-                            onClick = { onExportDecoded(decodeResult.finalOutput) },
-                            modifier = Modifier.weight(1f).testTag("decoder_export_button")
-                        ) {
-                            Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Save As")
-                        }
-                        Button(
-                            onClick = onSendToEditor,
-                            colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = ObsidianDeep),
-                            modifier = Modifier.weight(1f).testTag("decoder_open_editor_button")
-                        ) {
-                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Editor", fontWeight = FontWeight.Bold)
-                        }
-                    }
-
                     if (decodeResult.isSuccessful) {
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
                         Button(
                             onClick = { onApplyToVpn(decodeResult.finalOutput) },
                             colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = ObsidianDeep),

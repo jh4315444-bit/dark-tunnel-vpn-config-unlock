@@ -350,6 +350,15 @@ fun DashboardScreen(
                             }
                         } else if (report.canDirectDecode) {
                             Button(
+                                onClick = { onNavigate(WorkbenchDestination.UNLOCKER) },
+                                colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = ObsidianDeep),
+                                modifier = Modifier.weight(1f).testTag("open_in_unlocker_button")
+                            ) {
+                                Icon(Icons.Default.LockOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("View Clean JSON", fontWeight = FontWeight.Bold)
+                            }
+                            Button(
                                 onClick = { onNavigate(WorkbenchDestination.DECODER) },
                                 colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = ObsidianDeep),
                                 modifier = Modifier.weight(1f).testTag("open_in_decoder_button")
@@ -365,7 +374,7 @@ fun DashboardScreen(
                             ) {
                                 Icon(Icons.Default.Edit, contentDescription = null, tint = NeonGreen, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Open Editor", color = NeonGreen)
+                                Text("Editor", color = NeonGreen)
                             }
                         }
                     }

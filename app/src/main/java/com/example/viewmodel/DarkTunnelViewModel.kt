@@ -324,9 +324,13 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
 
             // Automatically run deep decompression + multi-layer decoding so the user never sees garbled bytes
             val decodedFromBytes = ConfigCryptoEngine.decodePayloadFromBytes(rawBytes)
-            val cleanInputForDecoder = ConfigCryptoEngine.cleanAndSanitizePrintableText(
-                ConfigCryptoEngine.tryDecompressContainerBytes(rawBytes).first
-            )
+            val cleanInputForDecoder = if (!report.requiresPasswordKey && decodedFromBytes.isSuccessful && decodedFromBytes.finalOutput.isNotBlank()) {
+                decodedFromBytes.finalOutput
+            } else {
+                ConfigCryptoEngine.cleanAndSanitizePrintableText(
+                    ConfigCryptoEngine.tryDecompressContainerBytes(rawBytes).first
+                )
+            }
             _decoderInputText.value = cleanInputForDecoder
             _decodeResult.value = decodedFromBytes
 
@@ -334,8 +338,16 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
                 _editorFileName.value = fileName.substringBeforeLast('.') + "_decoded.json"
                 _editorOriginalContent.value = decodedFromBytes.finalOutput
                 _editorContent.value = decodedFromBytes.finalOutput
+                _unlockResult.value = UnlockOperationResult.Success(
+                    decryptedContent = decodedFromBytes.finalOutput,
+                    formattedInspectorReport = decodedFromBytes.formattedInspectorReport,
+                    parsedFields = decodedFromBytes.parsedFields,
+                    cipherSuiteUsed = report.detectedContainerSignature,
+                    kdfIterations = 0,
+                    integrityVerified = true
+                )
             } else if (report.formatState == ConfigFormatState.READABLE_JSON_OR_TEXT) {
-                val text = String(rawBytes, StandardCharsets.UTF_8)
+                val text = decodedFromBytes.finalOutput.ifBlank { String(rawBytes, StandardCharsets.UTF_8) }
                 _editorFileName.value = fileName
                 _editorOriginalContent.value = text
                 _editorContent.value = text
@@ -380,9 +392,22 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
                     analysisReport = report
                 )
                 val decoded = ConfigCryptoEngine.decodePayloadFromBytes(bytes)
-                _decoderInputText.value = ConfigCryptoEngine.cleanAndSanitizePrintableText(bytes)
+                _decoderInputText.value = if (!report.requiresPasswordKey && decoded.isSuccessful) {
+                    decoded.finalOutput
+                } else {
+                    ConfigCryptoEngine.cleanAndSanitizePrintableText(bytes)
+                }
                 _decodeResult.value = decoded
-                _unlockResult.value = null
+                _unlockResult.value = if (!report.requiresPasswordKey && decoded.isSuccessful) {
+                    UnlockOperationResult.Success(
+                        decryptedContent = decoded.finalOutput,
+                        formattedInspectorReport = decoded.formattedInspectorReport,
+                        parsedFields = decoded.parsedFields,
+                        cipherSuiteUsed = report.detectedContainerSignature,
+                        kdfIterations = 0,
+                        integrityVerified = true
+                    )
+                } else null
                 showBanner("Restored ${record.fileName} from immutable backup.")
             } else {
                 showBanner("Backup file no longer exists on disk.")
@@ -416,13 +441,14 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
             _unlockResult.value = result
             when (result) {
                 is UnlockOperationResult.Success -> {
+                    val cleanJson = result.formattedInspectorReport.ifBlank { result.decryptedContent }
                     _editorFileName.value = current.fileName.substringBeforeLast('.') + "_unlocked.json"
-                    _editorOriginalContent.value = result.decryptedContent
-                    _editorContent.value = result.decryptedContent
-                    // Also sync to Decoder so both screens show the clear unlocked fields
-                    _decoderInputText.value = result.decryptedContent
+                    _editorOriginalContent.value = cleanJson
+                    _editorContent.value = cleanJson
+                    // Also sync to Decoder so both screens show the clean formatted JSON
+                    _decoderInputText.value = cleanJson
                     _decodeResult.value = withContext(Dispatchers.Default) {
-                        ConfigCryptoEngine.decodePayload(result.decryptedContent)
+                        ConfigCryptoEngine.decodePayload(cleanJson)
                     }
                     repository.logOperation(
                         category = "UNLOCK",
@@ -430,7 +456,7 @@ class DarkTunnelViewModel(application: Application) : AndroidViewModel(applicati
                         status = "SUCCESS",
                         details = "Unlocked via ${result.cipherSuiteUsed} (${result.parsedFields.size} parameters extracted)."
                     )
-                    showBanner("Unlocked! All configuration parameters are now clearly visible below.")
+                    showBanner("Unlocked! Clean JSON configuration is now clearly visible below.")
                 }
                 is UnlockOperationResult.Failure -> {
                     repository.logOperation(

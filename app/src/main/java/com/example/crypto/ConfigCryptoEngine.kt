@@ -123,114 +123,412 @@ object ConfigCryptoEngine {
     }
 
     /**
-     * Deeply unpacks compressed streams (GZIP, ZLIB, ZIP) or binary containers to extract readable text.
+     * Deeply unpacks compressed streams (GZIP, ZLIB, ZIP) at offset 0 or any header offset (0..128),
+     * or decrypts standard container ciphers to extract readable JSON/configuration text.
      */
     fun tryDecompressContainerBytes(rawBytes: ByteArray): Pair<ByteArray, String?> {
         if (rawBytes.size < 4) return rawBytes to null
 
-        // 1. Check GZIP magic (0x1F 0x8B)
-        if (rawBytes[0] == 0x1F.toByte() && rawBytes[1] == 0x8B.toByte()) {
-            try {
-                return gunzip(rawBytes) to "GZIP (0x1F8B)"
-            } catch (_: Exception) {
-            }
-        }
+        // Scan offset 0..64 for GZIP, PKZIP, or ZLIB headers (handles .dark / .hat / .ehi / .hc / .nm with prefix headers)
+        val maxOffset = minOf(rawBytes.size - 4, 64)
+        for (offset in 0..maxOffset) {
+            val b0 = rawBytes[offset]
+            val b1 = rawBytes[offset + 1]
 
-        // 2. Check PKZIP magic (0x50 0x4B 0x03 0x04)
-        if (rawBytes[0] == 0x50.toByte() && rawBytes[1] == 0x4B.toByte() &&
-            rawBytes[2] == 0x03.toByte() && rawBytes[3] == 0x04.toByte()
-        ) {
-            try {
-                val sb = StringBuilder()
-                ZipInputStream(ByteArrayInputStream(rawBytes)).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        if (!entry.isDirectory) {
-                            val entryBytes = zis.readBytes()
-                            val entryText = cleanAndSanitizePrintableText(entryBytes)
-                            if (entryText.isNotBlank()) {
-                                sb.append("// Entry: ${entry.name}\n").append(entryText).append("\n\n")
-                            }
-                        }
-                        entry = zis.nextEntry
+            // 1. Check GZIP magic (0x1F 0x8B)
+            if (b0 == 0x1F.toByte() && b1 == 0x8B.toByte()) {
+                try {
+                    val sliced = if (offset == 0) rawBytes else rawBytes.copyOfRange(offset, rawBytes.size)
+                    val out = gunzip(sliced)
+                    if (out.isNotEmpty()) {
+                        return out to if (offset == 0) "GZIP (0x1F8B)" else "GZIP @+$offset"
                     }
+                } catch (_: Exception) {
                 }
-                if (sb.isNotEmpty()) {
-                    return sb.toString().trim().toByteArray(StandardCharsets.UTF_8) to "ZIP Container Archive"
+            }
+
+            // 2. Check PKZIP magic (0x50 0x4B 0x03 0x04)
+            if (b0 == 0x50.toByte() && b1 == 0x4B.toByte() &&
+                rawBytes[offset + 2] == 0x03.toByte() && rawBytes[offset + 3] == 0x04.toByte()
+            ) {
+                try {
+                    val sliced = if (offset == 0) rawBytes else rawBytes.copyOfRange(offset, rawBytes.size)
+                    val entriesJson = JSONObject()
+                    val firstJsonCandidate = mutableListOf<String>()
+                    ZipInputStream(ByteArrayInputStream(sliced)).use { zis ->
+                        var entry = zis.nextEntry
+                        while (entry != null) {
+                            if (!entry.isDirectory) {
+                                val entryBytes = zis.readBytes()
+                                val entryText = extractCleanJsonOrText(entryBytes)
+                                if (entryText.isNotBlank()) {
+                                    firstJsonCandidate.add(entryText)
+                                    entriesJson.put(entry.name, tryParseJsonValue(entryText))
+                                }
+                            }
+                            entry = zis.nextEntry
+                        }
+                    }
+                    if (firstJsonCandidate.size == 1 && firstJsonCandidate[0].trim().startsWith("{")) {
+                        return firstJsonCandidate[0].toByteArray(StandardCharsets.UTF_8) to "ZIP Container Archive"
+                    } else if (entriesJson.length() > 0) {
+                        return entriesJson.toString(2).toByteArray(StandardCharsets.UTF_8) to "ZIP Container Archive"
+                    }
+                } catch (_: Exception) {
                 }
-            } catch (_: Exception) {
+            }
+
+            // 3. Check ZLIB Deflate magic (0x78 0x9C, 0x78 0x01, 0x78 0xDA, 0x78 0x5E)
+            if (b0 == 0x78.toByte() &&
+                (b1 == 0x9C.toByte() || b1 == 0x01.toByte() || b1 == 0xDA.toByte() || b1 == 0x5E.toByte())
+            ) {
+                try {
+                    val sliced = if (offset == 0) rawBytes else rawBytes.copyOfRange(offset, rawBytes.size)
+                    val bos = ByteArrayOutputStream()
+                    InflaterInputStream(ByteArrayInputStream(sliced)).use { iis ->
+                        iis.copyTo(bos)
+                    }
+                    val out = bos.toByteArray()
+                    if (out.isNotEmpty() && isMostlyPrintableUtf8(out)) {
+                        return out to if (offset == 0) "ZLIB Deflate (0x78)" else "ZLIB Deflate @+$offset"
+                    }
+                } catch (_: Exception) {
+                }
             }
         }
 
-        // 3. Check ZLIB Deflate magic (0x78 0x9C, 0x78 0x01, 0x78 0xDA)
-        if (rawBytes[0] == 0x78.toByte() &&
-            (rawBytes[1] == 0x9C.toByte() || rawBytes[1] == 0x01.toByte() || rawBytes[1] == 0xDA.toByte())
-        ) {
+        // 4. Try raw Inflater (nowrap = true) at common header offsets (0, 4, 8, 12, 16)
+        for (offset in listOf(0, 4, 8, 12, 16)) {
+            if (rawBytes.size <= offset + 4) continue
             try {
+                val sliced = if (offset == 0) rawBytes else rawBytes.copyOfRange(offset, rawBytes.size)
+                val inflater = Inflater(true)
+                inflater.setInput(sliced)
                 val bos = ByteArrayOutputStream()
-                InflaterInputStream(ByteArrayInputStream(rawBytes)).use { iis ->
-                    iis.copyTo(bos)
+                val buf = ByteArray(4096)
+                var loops = 0
+                while (!inflater.finished() && !inflater.needsInput() && loops < 256) {
+                    val count = inflater.inflate(buf)
+                    if (count <= 0) break
+                    bos.write(buf, 0, count)
+                    loops++
                 }
+                inflater.end()
                 val out = bos.toByteArray()
-                if (out.isNotEmpty()) {
-                    return out to "ZLIB Deflate (0x78)"
+                if (out.size >= 16 && isMostlyPrintableUtf8(out)) {
+                    return out to "Raw Deflate Stream"
                 }
             } catch (_: Exception) {
             }
-        }
-
-        // 4. Try raw Inflater (nowrap = true)
-        try {
-            val inflater = Inflater(true)
-            inflater.setInput(rawBytes)
-            val bos = ByteArrayOutputStream()
-            val buf = ByteArray(4096)
-            while (!inflater.finished() && !inflater.needsInput()) {
-                val count = inflater.inflate(buf)
-                if (count <= 0) break
-                bos.write(buf, 0, count)
-            }
-            inflater.end()
-            val out = bos.toByteArray()
-            if (out.size > rawBytes.size / 2 && isMostlyPrintableUtf8(out)) {
-                return out to "Raw Deflate Stream"
-            }
-        } catch (_: Exception) {
         }
 
         return rawBytes to null
     }
 
     /**
-     * Cleans any mixed binary/text stream into clear, readable UTF-8 configuration lines,
-     * removing garbage control bytes so the user never sees scrambled/garbled characters.
+     * Extracts clean, valid JSON or structured configuration text from a byte array,
+     * stripping any binary header/footer or garbled bytes and converting non-JSON into clean JSON if needed.
      */
     fun cleanAndSanitizePrintableText(bytes: ByteArray): String {
         if (bytes.isEmpty()) return ""
+        return extractCleanJsonOrText(bytes)
+    }
+
+    private fun extractCleanJsonOrText(bytes: ByteArray): String {
         val rawStr = String(bytes, StandardCharsets.UTF_8)
+
+        // 1. If the whole string is already clean printable UTF-8:
         if (!rawStr.contains('\uFFFD') && isMostlyPrintableUtf8(bytes)) {
-            return rawStr.trim()
+            val trimmed = rawStr.trim()
+            // Check if there is a JSON object embedded in it (e.g., after a short text header)
+            val embeddedJson = extractBalancedJsonBlock(trimmed)
+            if (embeddedJson != null) {
+                return embeddedJson
+            }
+            return trimmed
         }
 
-        // Extract contiguous printable ASCII/UTF-8 runs (minimum length 4) so binary headers don't pollute output
-        val sb = StringBuilder()
-        val currentRun = StringBuilder()
-        for (b in bytes) {
-            val code = b.toInt() and 0xFF
-            val isPrintable = (code in 32..126) || code == 9 || code == 10 || code == 13
-            if (isPrintable) {
-                currentRun.append(code.toChar())
-            } else {
-                if (currentRun.trim().length >= 4) {
-                    sb.append(currentRun.toString().trim()).append("\n")
+        // 2. Scan for a balanced JSON object `{ ... }` or array `[ ... ]` inside a binary container
+        val asciiMapped = buildString(bytes.size) {
+            for (b in bytes) {
+                val c = b.toInt() and 0xFF
+                if (c in 32..126 || c == 9 || c == 10 || c == 13) {
+                    append(c.toChar())
+                } else {
+                    append('\n')
                 }
-                currentRun.clear()
             }
         }
-        if (currentRun.trim().length >= 4) {
-            sb.append(currentRun.toString().trim())
+
+        val embeddedJson = extractBalancedJsonBlock(asciiMapped)
+        if (embeddedJson != null) {
+            return embeddedJson
         }
-        return sb.toString().trim()
+
+        // 3. Extract meaningful contiguous printable lines and structure them cleanly
+        val cleanLines = asciiMapped.lines()
+            .map { it.trim() }
+            .filter { line ->
+                line.length >= 4 && isMeaningfulConfigLine(line)
+            }
+
+        return cleanLines.joinToString("\n").trim()
+    }
+
+    /**
+     * Finds and pretty-prints the largest valid balanced JSON object `{...}` or array `[...]` inside a text buffer.
+     */
+    fun extractBalancedJsonBlock(text: String): String? {
+        val firstBrace = text.indexOf('{')
+        val lastBrace = text.lastIndexOf('}')
+        if (firstBrace >= 0 && lastBrace > firstBrace + 4) {
+            val candidate = text.substring(firstBrace, lastBrace + 1)
+            try {
+                val json = JSONObject(candidate)
+                return recursivelyDecodeAndFormatJsonObject(json).toString(2)
+            } catch (_: Exception) {
+                // Scan for balanced braces starting from each '{'
+                var startIdx = firstBrace
+                while (startIdx >= 0 && startIdx < lastBrace) {
+                    var depth = 0
+                    var inQuotes = false
+                    var escaped = false
+                    for (i in startIdx until text.length) {
+                        val ch = text[i]
+                        if (escaped) {
+                            escaped = false
+                            continue
+                        }
+                        if (ch == '\\') {
+                            escaped = true
+                            continue
+                        }
+                        if (ch == '"') {
+                            inQuotes = !inQuotes
+                            continue
+                        }
+                        if (!inQuotes) {
+                            if (ch == '{') depth++
+                            else if (ch == '}') {
+                                depth--
+                                if (depth == 0) {
+                                    val sub = text.substring(startIdx, i + 1)
+                                    if (sub.length >= 10) {
+                                        try {
+                                            val j = JSONObject(sub)
+                                            return recursivelyDecodeAndFormatJsonObject(j).toString(2)
+                                        } catch (_: Exception) {
+                                        }
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    startIdx = text.indexOf('{', startIdx + 1)
+                }
+            }
+        }
+        return null
+    }
+
+    private fun isMeaningfulConfigLine(line: String): Boolean {
+        if (line.isBlank()) return false
+        var alphaNumOrJson = 0
+        var weirdSymbols = 0
+        for (ch in line) {
+            when {
+                ch.isLetterOrDigit() || ch in " {}:.,\"'/-_=@?&#[]()" -> alphaNumOrJson++
+                else -> weirdSymbols++
+            }
+        }
+        val ratio = alphaNumOrJson.toDouble() / line.length.toDouble()
+        return ratio >= 0.85 && weirdSymbols <= 2
+    }
+
+    /**
+     * Recursively formats a JSONObject and unpacks any nested JSON strings or Base64-encoded JSON values
+     * so every nested key (`sshConfig`, `v2rayConfig`, `proxy`, `headers`, etc.) is crystal-clear JSON.
+     */
+    private fun recursivelyDecodeAndFormatJsonObject(json: JSONObject, depth: Int = 0): JSONObject {
+        if (depth > 4) return json
+        val out = JSONObject()
+        val keys = json.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val v = json.opt(k)
+            when (v) {
+                is JSONObject -> {
+                    out.put(k, recursivelyDecodeAndFormatJsonObject(v, depth + 1))
+                }
+                is JSONArray -> {
+                    out.put(k, recursivelyDecodeAndFormatJsonArray(v, depth + 1))
+                }
+                is String -> {
+                    val trimmedVal = v.trim()
+                    // 1. If the string value itself is a serialized JSON object or array, parse it directly into real JSON!
+                    if (trimmedVal.startsWith("{") && trimmedVal.endsWith("}")) {
+                        try {
+                            val innerObj = JSONObject(trimmedVal)
+                            out.put(k, recursivelyDecodeAndFormatJsonObject(innerObj, depth + 1))
+                            continue
+                        } catch (_: Exception) {
+                        }
+                    } else if (trimmedVal.startsWith("[") && trimmedVal.endsWith("]")) {
+                        try {
+                            val innerArr = JSONArray(trimmedVal)
+                            out.put(k, recursivelyDecodeAndFormatJsonArray(innerArr, depth + 1))
+                            continue
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    // 2. If the key is a config/payload/data field (NOT salt/iv/ciphertext) and holds Base64 JSON/text, unpack it
+                    val cryptoKeys = setOf("salt", "iv", "ciphertext", "plaintextsha256", "sha256", "signature", "mac")
+                    if (k.lowercase() !in cryptoKeys && isLikelyBase64(trimmedVal) && trimmedVal.length >= 16) {
+                        try {
+                            val decBytes = decodeBase64Flexible(trimmedVal)
+                            val (unpacked, _) = tryDecompressContainerBytes(decBytes)
+                            if (isMostlyPrintableUtf8(unpacked)) {
+                                val decStr = String(unpacked, StandardCharsets.UTF_8).trim()
+                                if (decStr.startsWith("{") && decStr.endsWith("}")) {
+                                    out.put(k, recursivelyDecodeAndFormatJsonObject(JSONObject(decStr), depth + 1))
+                                    continue
+                                } else if (decStr.isNotEmpty()) {
+                                    out.put(k, decStr)
+                                    continue
+                                }
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+                    out.put(k, v)
+                }
+                else -> out.put(k, v)
+            }
+        }
+        return out
+    }
+
+    private fun recursivelyDecodeAndFormatJsonArray(arr: JSONArray, depth: Int = 0): JSONArray {
+        if (depth > 4) return arr
+        val out = JSONArray()
+        for (i in 0 until arr.length()) {
+            val v = arr.opt(i)
+            when (v) {
+                is JSONObject -> out.put(recursivelyDecodeAndFormatJsonObject(v, depth + 1))
+                is JSONArray -> out.put(recursivelyDecodeAndFormatJsonArray(v, depth + 1))
+                is String -> {
+                    val trimmedVal = v.trim()
+                    if (trimmedVal.startsWith("{") && trimmedVal.endsWith("}")) {
+                        try {
+                            out.put(recursivelyDecodeAndFormatJsonObject(JSONObject(trimmedVal), depth + 1))
+                        } catch (_: Exception) {
+                            out.put(v)
+                        }
+                    } else {
+                        out.put(v)
+                    }
+                }
+                else -> out.put(v)
+            }
+        }
+        return out
+    }
+
+    private fun tryParseJsonValue(text: String): Any {
+        val trimmed = text.trim()
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+            try {
+                return recursivelyDecodeAndFormatJsonObject(JSONObject(trimmed))
+            } catch (_: Exception) {
+            }
+        }
+        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+            try {
+                return recursivelyDecodeAndFormatJsonArray(JSONArray(trimmed))
+            } catch (_: Exception) {
+            }
+        }
+        return trimmed
+    }
+
+    /**
+     * Converts any non-JSON configuration text (such as INI, key=value, OpenVPN, SSH/HTTP Payload, or URI)
+     * into a clean, well-structured, 2-space indented JSON string so the output ALWAYS matches the
+     * clean JSON format expected by the user.
+     */
+    fun ensureCleanFormattedJsonOutput(rawText: String, parsedFields: Map<String, String>): String {
+        val trimmed = rawText.trim()
+        if (trimmed.isEmpty()) return "{\n}"
+
+        // 1. If already a JSON object
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+            try {
+                val json = JSONObject(trimmed)
+                return recursivelyDecodeAndFormatJsonObject(json).toString(2)
+            } catch (_: Exception) {
+            }
+        }
+
+        // 2. If already a JSON array
+        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+            try {
+                val arr = JSONArray(trimmed)
+                return recursivelyDecodeAndFormatJsonArray(arr).toString(2)
+            } catch (_: Exception) {
+            }
+        }
+
+        // 3. Check if a balanced JSON object is embedded inside the text
+        val embedded = extractBalancedJsonBlock(trimmed)
+        if (embedded != null) {
+            return embedded
+        }
+
+        // 4. Construct a clean, structured JSON object from extracted fields and directives
+        val structuredJson = JSONObject()
+        if (parsedFields.isNotEmpty()) {
+            for ((k, v) in parsedFields) {
+                if (k == "add" && parsedFields.containsKey("Server Host / IP")) continue
+                val numVal = v.toIntOrNull()
+                val boolVal = when (v.lowercase()) {
+                    "true", "yes (active)" -> true
+                    "false", "no" -> false
+                    else -> null
+                }
+                when {
+                    numVal != null -> structuredJson.put(k, numVal)
+                    boolVal != null -> structuredJson.put(k, boolVal)
+                    else -> structuredJson.put(k, v)
+                }
+            }
+        }
+
+        val lines = trimmed.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        for (line in lines) {
+            if (line.startsWith("#") || line.startsWith("//") || line.startsWith(";")) continue
+            if (line.contains("=")) {
+                val key = line.substringBefore("=").trim()
+                val value = line.substringAfter("=").trim().removeSurrounding("\"")
+                if (key.isNotEmpty() && !structuredJson.has(key)) {
+                    val asInt = value.toIntOrNull()
+                    if (asInt != null) structuredJson.put(key, asInt) else structuredJson.put(key, value)
+                }
+            } else if (line.contains(":") && !line.startsWith("GET ") && !line.startsWith("POST ") && !line.startsWith("CONNECT ")) {
+                val key = line.substringBefore(":").trim()
+                val value = line.substringAfter(":").trim().removeSurrounding("\"")
+                if (key.length in 1..32 && !structuredJson.has(key)) {
+                    val asInt = value.toIntOrNull()
+                    if (asInt != null) structuredJson.put(key, asInt) else structuredJson.put(key, value)
+                }
+            }
+        }
+
+        if (structuredJson.length() == 0) {
+            structuredJson.put("configData", trimmed)
+        }
+        return structuredJson.toString(2)
     }
 
     fun analyzeConfigBytes(fileName: String, rawBytes: ByteArray): FileAnalysisReport {
@@ -266,7 +564,7 @@ object ConfigCryptoEngine {
                 shannonEntropy = entropy,
                 formatState = ConfigFormatState.COMPRESSED_ARCHIVE,
                 detectedContainerSignature = compressionLabel,
-                diagnosticMessage = "Compressed $compressionLabel container detected (${decompressedBytes.size} bytes unpacked). Ready for clear decoding and inspection.",
+                diagnosticMessage = "Compressed $compressionLabel container detected (${decompressedBytes.size} bytes unpacked). Ready for clean JSON decoding.",
                 canDirectDecode = !isEncryptedInner,
                 requiresPasswordKey = isEncryptedInner
             )
@@ -338,7 +636,7 @@ object ConfigCryptoEngine {
                         shannonEntropy = entropy,
                         formatState = ConfigFormatState.READABLE_JSON_OR_TEXT,
                         detectedContainerSignature = "Plaintext JSON Tunnel Profile",
-                        diagnosticMessage = "Readable JSON configuration structure verified (${json.length()} top-level keys). All fields ready for clear view.",
+                        diagnosticMessage = "Readable JSON configuration structure verified (${json.length()} top-level keys). All fields ready for clear JSON view.",
                         canDirectDecode = true,
                         requiresPasswordKey = false
                     )
@@ -377,7 +675,7 @@ object ConfigCryptoEngine {
                 shannonEntropy = entropy,
                 formatState = ConfigFormatState.ENCODED_TEXT,
                 detectedContainerSignature = detectEncodingLabel(textTrimmed),
-                diagnosticMessage = "Encoded configuration payload detected (${detectEncodingLabel(textTrimmed)}). Open Decoder or Unlocker to view all clear fields.",
+                diagnosticMessage = "Encoded configuration payload detected (${detectEncodingLabel(textTrimmed)}). Open Decoder or Unlocker to view clean formatted JSON.",
                 canDirectDecode = true,
                 requiresPasswordKey = false
             )
@@ -392,7 +690,7 @@ object ConfigCryptoEngine {
                 shannonEntropy = entropy,
                 formatState = ConfigFormatState.CORRUPTED_OR_INVALID,
                 detectedContainerSignature = "BINARY_OR_PROPRIETARY_CONTAINER",
-                diagnosticMessage = "High entropy (${"%.2f".format(entropy)} bits/byte) binary container. Use Decoder or Unlocker to extract readable configuration strings.",
+                diagnosticMessage = "High entropy (${"%.2f".format(entropy)} bits/byte) binary container. Use Decoder or Unlocker to extract structured JSON configuration.",
                 canDirectDecode = true,
                 requiresPasswordKey = false
             )
@@ -406,7 +704,7 @@ object ConfigCryptoEngine {
             shannonEntropy = entropy,
             formatState = ConfigFormatState.READABLE_JSON_OR_TEXT,
             detectedContainerSignature = "Plaintext Tunnel Script / Directives",
-            diagnosticMessage = "Readable plaintext configuration detected. Ready for clear inspection and editing.",
+            diagnosticMessage = "Readable configuration detected. Ready for clear JSON inspection and editing.",
             canDirectDecode = true,
             requiresPasswordKey = false
         )
@@ -461,7 +759,7 @@ object ConfigCryptoEngine {
 
     /**
      * Unlocks encrypted containers and also deeply decodes any nested Base64/Hex/URI/JSON layers inside
-     * so the user immediately sees crystal-clear, structured configuration data.
+     * so the user immediately sees crystal-clear, 2-space indented JSON configuration data.
      */
     fun unlockContainer(rawBytes: ByteArray, passwordOrKey: String): UnlockOperationResult {
         if (rawBytes.isEmpty()) {
@@ -484,7 +782,7 @@ object ConfigCryptoEngine {
             )
         }
 
-        // Check if the file is actually encoded/compressed (no password encryption) — if so, decode it clearly!
+        // Check if the file is actually encoded/compressed (no password encryption) — if so, decode it into clean JSON!
         val workingText = String(workingBytes, StandardCharsets.UTF_8).trim()
         val isBinaryMagic = workingBytes.size >= 32 &&
             String(workingBytes.copyOfRange(0, 4), StandardCharsets.US_ASCII) in setOf("DTV1", "HAT1", "EHI1", "NM01", "HC01")
@@ -492,7 +790,6 @@ object ConfigCryptoEngine {
             workingText.contains("\"ciphertext\"") && (workingText.contains("\"salt\"") || workingText.contains("\"iv\""))
 
         if (!isBinaryMagic && !isJsonEncrypted) {
-            // Check if it's malformed JSON starting with '{'
             if (workingText.startsWith("{") && !workingText.endsWith("}")) {
                 return UnlockOperationResult.Failure(
                     errorTitle = "Corrupted JSON Container",
@@ -501,7 +798,6 @@ object ConfigCryptoEngine {
                     isCorruptedFile = true
                 )
             }
-            // Try deep decoding if it's an encoded or compressed config file (.ehi, .hat, .hc, .nm, .dark)
             val decoded = decodePayloadFromBytes(workingBytes)
             if (decoded.isSuccessful && decoded.finalOutput.isNotBlank()) {
                 return UnlockOperationResult.Success(
@@ -539,10 +835,10 @@ object ConfigCryptoEngine {
                 val deepDecoded = decodePayload(rawPlainText)
                 val finalCleanText = if (deepDecoded.isSuccessful) deepDecoded.finalOutput else rawPlainText
                 val fields = extractReadableConfigFields(finalCleanText)
-                val report = buildClearInspectorReport(finalCleanText, fields, "$magic4 Binary AES-256-GCM")
+                val cleanPrettyJson = ensureCleanFormattedJsonOutput(finalCleanText, fields)
                 UnlockOperationResult.Success(
                     decryptedContent = rawPlainText,
-                    formattedInspectorReport = report,
+                    formattedInspectorReport = cleanPrettyJson,
                     parsedFields = fields,
                     cipherSuiteUsed = "$magic4 Binary AES-256-GCM",
                     kdfIterations = DEFAULT_ITERATIONS,
@@ -645,15 +941,11 @@ object ConfigCryptoEngine {
                 decryptedText
             }
             val parsedFields = extractReadableConfigFields(bestReadable)
-            val inspectorReport = buildClearInspectorReport(
-                cleanJsonOrText = bestReadable,
-                fields = parsedFields,
-                sourceMethod = "$cipherMode / PBKDF2-HMAC-SHA256 ($iterations iterations)"
-            )
+            val cleanPrettyJson = ensureCleanFormattedJsonOutput(bestReadable, parsedFields)
 
             UnlockOperationResult.Success(
                 decryptedContent = decryptedText,
-                formattedInspectorReport = inspectorReport,
+                formattedInspectorReport = cleanPrettyJson,
                 parsedFields = parsedFields,
                 cipherSuiteUsed = "$cipherMode / PBKDF2-HMAC-SHA256",
                 kdfIterations = iterations,
@@ -691,7 +983,8 @@ object ConfigCryptoEngine {
     }
 
     /**
-     * Decodes raw file bytes (handling GZIP/ZLIB/ZIP decompression, binary string extraction, and multi-layer text decoding).
+     * Decodes raw file bytes (handling GZIP/ZLIB/ZIP decompression, binary string extraction, and multi-layer text decoding)
+     * into a clean, 2-space indented JSON structure.
      */
     fun decodePayloadFromBytes(rawBytes: ByteArray): DecodeOperationResult {
         val (unpackedBytes, compressionType) = tryDecompressContainerBytes(rawBytes)
@@ -702,7 +995,7 @@ object ConfigCryptoEngine {
                 stepIndex = 0,
                 encodingType = "Decompress $compressionType",
                 summary = "Unpacked $compressionType stream (${rawBytes.size} B -> ${unpackedBytes.size} B).",
-                outputPreview = cleanText.take(180)
+                outputPreview = result.finalOutput.take(180)
             )
             return result.copy(
                 detectedFormatSummary = "$compressionType + ${result.detectedFormatSummary}",
@@ -713,9 +1006,9 @@ object ConfigCryptoEngine {
     }
 
     /**
-     * Multi-layer decoder for Base64, URL-Safe Base64, Hexadecimal, URL Encoding, ROT13/Caesar, XOR obfuscation,
+     * Multi-layer decoder for Base64, URL-Safe Base64, Hexadecimal, URL Encoding, GZIP-in-Base64,
      * JSON pretty-printing, and VPN URI schemes (vmess://, vless://, trojan://, ss://, darktunnel://, ssh://).
-     * Produces a crystal-clear, human-readable formatted configuration report so nothing looks scrambled.
+     * Always produces a crystal-clear, 2-space indented JSON string in both `finalOutput` and `formattedInspectorReport`.
      */
     fun decodePayload(rawInput: String): DecodeOperationResult {
         val trimmed = rawInput.trim()
@@ -747,18 +1040,19 @@ object ConfigCryptoEngine {
                     if (hint.isNotBlank()) {
                         fields["Password Hint"] = hint
                     }
+                    val prettyLocked = json.toString(2)
                     return DecodeOperationResult(
                         isSuccessful = false,
                         isEncryptedAndNeedsKey = true,
-                        finalOutput = trimmed,
-                        formattedInspectorReport = buildClearInspectorReport(trimmed, fields, "Encrypted Container ($cipher)"),
+                        finalOutput = prettyLocked,
+                        formattedInspectorReport = prettyLocked,
                         detectedFormatSummary = "Encrypted Container ($cipher)",
                         steps = listOf(
                             DecodeStepTrace(
                                 stepIndex = 1,
                                 encodingType = "Cryptographic Container Detected",
                                 summary = "Detected $cipher encrypted payload. Encrypted containers require a decryption password in the Config Unlocker screen.",
-                                outputPreview = trimmed.take(180)
+                                outputPreview = prettyLocked.take(180)
                             )
                         ),
                         parsedFields = fields
@@ -796,7 +1090,7 @@ object ConfigCryptoEngine {
                         var decodedStr = String(unpacked, StandardCharsets.UTF_8).trim()
                         if (decodedStr.startsWith("{") && decodedStr.endsWith("}")) {
                             try {
-                                val j = JSONObject(decodedStr)
+                                val j = recursivelyDecodeAndFormatJsonObject(JSONObject(decodedStr))
                                 if (fragment.isNotBlank() && !j.has("remarks") && !j.has("ps")) {
                                     j.put("remarks", fragment)
                                 }
@@ -811,7 +1105,7 @@ object ConfigCryptoEngine {
                             DecodeStepTrace(
                                 stepIndex = stepCounter++,
                                 encodingType = "$scheme URI + Base64 Unpack",
-                                summary = "Decoded $scheme tunnel URI into clear readable configuration.",
+                                summary = "Decoded $scheme tunnel URI into clear readable JSON configuration.",
                                 outputPreview = current.take(180)
                             )
                         )
@@ -834,36 +1128,19 @@ object ConfigCryptoEngine {
                 break@varprog
             }
 
-            // 2. If valid JSON, check if any inner fields ("payload", "config", "data", "v2ray") are Base64 encoded
+            // 2. If valid JSON, recursively unpack all nested JSON strings and Base64 fields and pretty-print with 2-space indentation
             if (candidate.startsWith("{") && candidate.endsWith("}")) {
                 try {
                     val jsonObj = JSONObject(candidate)
-                    var modifiedInner = false
-                    val encodedFieldNames = listOf("config", "data", "rawConfig", "encodedPayload", "vmess")
-                    for (fieldKey in encodedFieldNames) {
-                        if (jsonObj.has(fieldKey)) {
-                            val rawVal = jsonObj.optString(fieldKey, "")
-                            if (isLikelyBase64(rawVal)) {
-                                try {
-                                    val decBytes = decodeBase64Flexible(rawVal)
-                                    if (isMostlyPrintableUtf8(decBytes)) {
-                                        val decStr = String(decBytes, StandardCharsets.UTF_8).trim()
-                                        jsonObj.put("${fieldKey}_decoded", decStr)
-                                        modifiedInner = true
-                                    }
-                                } catch (_: Exception) {
-                                }
-                            }
-                        }
-                    }
-                    val pretty = jsonObj.toString(2)
-                    if (pretty != current || modifiedInner) {
+                    val unpackedObj = recursivelyDecodeAndFormatJsonObject(jsonObj)
+                    val pretty = unpackedObj.toString(2)
+                    if (pretty != current) {
                         current = pretty
                         steps.add(
                             DecodeStepTrace(
                                 stepIndex = stepCounter++,
                                 encodingType = "JSON Structure Formatting",
-                                summary = "Formatted and unpacked all JSON configuration fields (${jsonObj.length()} keys).",
+                                summary = "Formatted and unpacked all JSON configuration fields (${unpackedObj.length()} keys).",
                                 outputPreview = current.take(180)
                             )
                         )
@@ -959,98 +1236,55 @@ object ConfigCryptoEngine {
             break@varprog
         }
 
-        // Final pass: if current is valid JSON, ensure 2-space pretty formatting
-        val finalClean = try {
-            val trimmedFinal = current.trim()
-            if (trimmedFinal.startsWith("{") && trimmedFinal.endsWith("}")) {
-                JSONObject(trimmedFinal).toString(2)
-            } else if (trimmedFinal.startsWith("[") && trimmedFinal.endsWith("]")) {
-                JSONArray(trimmedFinal).toString(2)
-            } else {
-                cleanAndSanitizePrintableText(trimmedFinal.toByteArray(StandardCharsets.UTF_8))
-            }
-        } catch (_: Exception) {
-            current
+        val extractedFields = extractReadableConfigFields(current)
+        // Always ensure the final output is clean, 2-space indented JSON without any ASCII banner borders
+        val finalCleanJson = ensureCleanFormattedJsonOutput(current, extractedFields)
+        val mergedFields = extractReadableConfigFields(finalCleanJson).let { newFields ->
+            val combined = linkedMapOf<String, String>()
+            combined.putAll(extractedFields)
+            combined.putAll(newFields)
+            combined
         }
 
-        val extractedFields = extractReadableConfigFields(finalClean)
         val formatSummary = if (steps.isEmpty()) {
-            "Plaintext / Structured Configuration"
+            "Formatted JSON Configuration"
         } else {
             "Decoded (${steps.size} layer${if (steps.size > 1) "s" else ""}): ${steps.joinToString(" → ") { it.encodingType }}"
         }
 
-        val inspectorReport = buildClearInspectorReport(
-            cleanJsonOrText = finalClean,
-            fields = extractedFields,
-            sourceMethod = formatSummary
-        )
-
         if (steps.isEmpty()) {
-            val bytes = finalClean.toByteArray(StandardCharsets.UTF_8)
+            val bytes = current.toByteArray(StandardCharsets.UTF_8)
             val isReadable = isMostlyPrintableUtf8(bytes)
             if (isReadable) {
                 steps.add(
                     DecodeStepTrace(
                         stepIndex = 1,
-                        encodingType = "Direct Plaintext Inspection",
-                        summary = "Extracted all readable configuration parameters into clear view.",
-                        outputPreview = finalClean.take(180)
+                        encodingType = "Clean JSON Formatting",
+                        summary = "Formatted configuration into clean 2-space indented JSON.",
+                        outputPreview = finalCleanJson.take(180)
                     )
                 )
             }
             return DecodeOperationResult(
                 isSuccessful = isReadable,
                 isEncryptedAndNeedsKey = false,
-                finalOutput = finalClean,
-                formattedInspectorReport = inspectorReport,
+                finalOutput = finalCleanJson,
+                formattedInspectorReport = finalCleanJson,
                 detectedFormatSummary = formatSummary,
                 steps = steps,
-                parsedFields = extractedFields
+                parsedFields = mergedFields
             )
         }
 
         return DecodeOperationResult(
             isSuccessful = true,
             isEncryptedAndNeedsKey = false,
-            finalOutput = finalClean,
-            formattedInspectorReport = inspectorReport,
+            finalOutput = finalCleanJson,
+            formattedInspectorReport = finalCleanJson,
             detectedFormatSummary = formatSummary,
             steps = steps,
-            parsedFields = extractedFields
+            parsedFields = mergedFields
         )
-    }
-
-    /**
-     * Builds a crystal-clear, structured, human-readable report showing every unlocked/decoded VPN parameter
-     * (Server Host, Port, Protocol, Username/UUID, Password, SNI, Payload, DNS) followed by the clean raw config.
-     */
-    fun buildClearInspectorReport(
-        cleanJsonOrText: String,
-        fields: Map<String, String>,
-        sourceMethod: String
-    ): String {
-        val sb = StringBuilder()
-        sb.append("====================================================\n")
-        sb.append("   DARK TUNNEL — UNLOCKED CONFIG INSPECTOR REPORT   \n")
-        sb.append("====================================================\n")
-        sb.append("Method : $sourceMethod\n")
-        sb.append("Status : CLEAR & READABLE (100% Decoded)\n")
-        sb.append("----------------------------------------------------\n")
-
-        if (fields.isNotEmpty()) {
-            sb.append("[ EXTRACTED VPN PARAMETERS ]\n")
-            for ((k, v) in fields) {
-                val paddedKey = k.padEnd(20, ' ')
-                sb.append("• $paddedKey : $v\n")
-            }
-            sb.append("----------------------------------------------------\n")
-        }
-
-        sb.append("[ FULL READABLE CONFIGURATION DATA ]\n")
-        sb.append(cleanJsonOrText.trim())
-        sb.append("\n====================================================")
-        return sb.toString()
     }
 
     private fun decodeEmbeddedLinesIfAny(input: String): String? {
@@ -1063,9 +1297,10 @@ object ConfigCryptoEngine {
                 if (isLikelyBase64(rawVal) && rawVal.length >= 16) {
                     try {
                         val dec = decodeBase64Flexible(rawVal)
-                        if (isMostlyPrintableUtf8(dec)) {
+                        val (unpacked, _) = tryDecompressContainerBytes(dec)
+                        if (isMostlyPrintableUtf8(unpacked)) {
                             changed = true
-                            "$key = ${String(dec, StandardCharsets.UTF_8).trim()}"
+                            "$key = ${String(unpacked, StandardCharsets.UTF_8).trim()}"
                         } else line
                     } catch (_: Exception) {
                         line
@@ -1104,7 +1339,7 @@ object ConfigCryptoEngine {
                     val elapsed = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                     return PasswordRecoveryReport(
                         recoveredPassword = candidate,
-                        decryptedPayload = res.decryptedContent,
+                        decryptedPayload = res.formattedInspectorReport,
                         formattedInspectorReport = res.formattedInspectorReport,
                         parsedFields = res.parsedFields,
                         testedCount = tested,
@@ -1289,7 +1524,7 @@ object ConfigCryptoEngine {
 
     /**
      * Extracts all recognizable VPN configuration fields into clean, human-readable labels
-     * from both JSON and key=value / INI / OpenVPN / HTTP Injector style config files.
+     * from both JSON (including DarkTunnel `sshConfig`/`v2rayConfig` schemas) and key=value / INI config files.
      */
     fun extractReadableConfigFields(text: String): Map<String, String> {
         val fields = linkedMapOf<String, String>()
@@ -1303,7 +1538,7 @@ object ConfigCryptoEngine {
                     for (k in keys) {
                         if (json.has(k)) {
                             val v = json.optString(k, "").trim()
-                            if (v.isNotEmpty() && v != "null") {
+                            if (v.isNotEmpty() && v != "null" && !v.startsWith("{")) {
                                 fields[label] = v
                                 return
                             }
@@ -1312,17 +1547,34 @@ object ConfigCryptoEngine {
                 }
 
                 putIfPresent("Profile Name", "name", "ps", "remarks", "profileName", "Profile Name")
-                putIfPresent("Protocol", "protocolDisplay", "protocol", "type", "net", "Protocol")
+                putIfPresent("Protocol", "tunnelType", "protocolDisplay", "protocol", "type", "net", "Protocol")
                 putIfPresent("Server Host / IP", "serverHost", "add", "server", "host", "Server Host")
                 putIfPresent("Server Port", "serverPort", "port", "Server Port")
                 putIfPresent("Username / UUID", "username", "user", "id", "uuid", "Username", "Username / UUID")
                 putIfPresent("Password / Secret", "authSecret", "password", "pass", "Password / Key")
                 putIfPresent("TLS / Security", "tls", "security", "TLS Security")
-                putIfPresent("TLS SNI Host", "sni", "sniHost", "servername", "TLS SNI Host")
+                putIfPresent("TLS SNI Host", "sni", "sniHost", "servername", "serverNameIndicator", "TLS SNI Host")
                 putIfPresent("WebSocket Path", "wsPath", "path", "WebSocket Path")
                 putIfPresent("HTTP Payload", "httpPayload", "payload", "customPayload")
                 putIfPresent("Verification Status", "verificationStatus")
                 putIfPresent("Note / Message", "note")
+
+                // DarkTunnel `sshConfig` nested object support
+                json.optJSONObject("sshConfig")?.let { sshCfg ->
+                    sshCfg.optString("host", "").takeIf { it.isNotBlank() }?.let { fields["Server Host / IP"] = it }
+                    if (sshCfg.has("port")) fields["Server Port"] = sshCfg.optInt("port", 443).toString()
+                    sshCfg.optString("username", "").takeIf { it.isNotBlank() }?.let { fields["Username / UUID"] = it }
+                    sshCfg.optString("password", "").takeIf { it.isNotBlank() }?.let { fields["Password / Secret"] = it }
+                    sshCfg.optString("serverNameIndicator", "").takeIf { it.isNotBlank() }?.let { fields["TLS SNI Host"] = it }
+                    sshCfg.optString("payload", "").takeIf { it.isNotBlank() }?.let { fields["HTTP Payload"] = it }
+                    sshCfg.optJSONObject("proxy")?.let { proxy ->
+                        val pType = proxy.optString("type", "")
+                        if (pType.isNotBlank()) fields["Proxy Type"] = pType
+                        val pHost = proxy.optString("host", "")
+                        val pPort = proxy.optInt("port", 0)
+                        if (pHost.isNotBlank()) fields["Proxy Endpoint"] = if (pPort > 0) "$pHost:$pPort" else pHost
+                    }
+                }
 
                 // Nested objects: ssh, tls, websocket, dns
                 json.optJSONObject("ssh")?.let { ssh ->

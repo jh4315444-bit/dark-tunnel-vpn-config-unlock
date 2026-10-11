@@ -285,7 +285,51 @@ fun UnlockerScreen(
                                 }
                             }
 
-                            // 1. Highlighted Clear Key-Value Table (Server, Port, SNI, Payload, Username, etc.)
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = "Unlocked Clean JSON Configuration:",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = NeonGreen
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            CodePreviewBox(code = unlockResult.formattedInspectorReport)
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        clipboard.setText(AnnotatedString(unlockResult.formattedInspectorReport))
+                                        onShowMessage("Copied clean JSON configuration to clipboard.")
+                                    },
+                                    modifier = Modifier.weight(1f).testTag("copy_unlocked_button")
+                                ) {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Copy JSON")
+                                }
+                                OutlinedButton(
+                                    onClick = { onExportUnlocked(unlockResult.formattedInspectorReport) },
+                                    modifier = Modifier.weight(1f).testTag("export_unlocked_button")
+                                ) {
+                                    Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Save JSON")
+                                }
+                                Button(
+                                    onClick = { onNavigate(WorkbenchDestination.EDITOR) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = ObsidianDeep),
+                                    modifier = Modifier.weight(1f).testTag("edit_unlocked_button")
+                                ) {
+                                    Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Editor", fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            // Highlighted Clear Key-Value Table (Server, Port, SNI, Payload, Username, etc.)
                             if (unlockResult.parsedFields.isNotEmpty()) {
                                 Spacer(modifier = Modifier.height(14.dp))
                                 Text(
@@ -303,53 +347,9 @@ fun UnlockerScreen(
                                 )
                             }
 
-                            Spacer(modifier = Modifier.height(14.dp))
-                            Text(
-                                text = "Full Unlocked Inspector Report & Readable Config:",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            CodePreviewBox(code = unlockResult.formattedInspectorReport)
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = {
-                                        clipboard.setText(AnnotatedString(unlockResult.formattedInspectorReport))
-                                        onShowMessage("Copied full unlocked report to clipboard.")
-                                    },
-                                    modifier = Modifier.weight(1f).testTag("copy_unlocked_button")
-                                ) {
-                                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Copy All")
-                                }
-                                OutlinedButton(
-                                    onClick = { onExportUnlocked(unlockResult.decryptedContent) },
-                                    modifier = Modifier.weight(1f).testTag("export_unlocked_button")
-                                ) {
-                                    Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Save File")
-                                }
-                                Button(
-                                    onClick = { onNavigate(WorkbenchDestination.EDITOR) },
-                                    colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = ObsidianDeep),
-                                    modifier = Modifier.weight(1f).testTag("edit_unlocked_button")
-                                ) {
-                                    Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Editor", fontWeight = FontWeight.Bold)
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(10.dp))
                             Button(
-                                onClick = { onApplyToVpn(unlockResult.decryptedContent) },
+                                onClick = { onApplyToVpn(unlockResult.formattedInspectorReport) },
                                 colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = ObsidianDeep),
                                 modifier = Modifier.fillMaxWidth()
                             ) {

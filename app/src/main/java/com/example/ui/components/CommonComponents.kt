@@ -6,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,7 +17,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -25,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -283,23 +287,53 @@ fun CodePreviewBox(
     code: String,
     modifier: Modifier = Modifier
 ) {
-    val highlighter = ConfigSyntaxHighlightTransformation()
-    val highlighted = highlighter.filter(AnnotatedString(code)).text
+    val highlighter = remember { ConfigSyntaxHighlightTransformation() }
+    val cleanCode = code.trim()
+    val highlighted = remember(cleanCode) {
+        highlighter.filter(AnnotatedString(cleanCode)).text
+    }
+    val lineCount = remember(cleanCode) {
+        cleanCode.lines().size.coerceAtLeast(1)
+    }
+    val lineNumbersText = remember(lineCount) {
+        (1..lineCount).joinToString("\n") { it.toString().padStart(2, ' ') }
+    }
 
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         color = Color(0xFF060A12),
-        border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.28f))
+        border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.35f))
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp)
+        ) {
             Text(
-                text = highlighted,
+                text = lineNumbersText,
                 fontFamily = JetBrainsMonoFontFamily,
                 fontSize = 12.sp,
-                lineHeight = 18.sp,
-                color = Color(0xFFE2E8F0)
+                lineHeight = 19.sp,
+                color = NeonCyan.copy(alpha = 0.45f),
+                modifier = Modifier.padding(end = 10.dp)
             )
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState())
+            ) {
+                SelectionContainer {
+                    Text(
+                        text = highlighted,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontSize = 12.5.sp,
+                        lineHeight = 19.sp,
+                        softWrap = false,
+                        color = Color(0xFFE2E8F0)
+                    )
+                }
+            }
         }
     }
 }

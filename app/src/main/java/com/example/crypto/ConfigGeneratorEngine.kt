@@ -176,6 +176,20 @@ object ConfigGeneratorEngine {
      */
     fun buildAuthorizedSampleEncryptedDarkFile(samplePassword: String = "DarkTunnel#2026"): ByteArray {
         val sampleJson = JSONObject().apply {
+            put("tunnelType", "SSH")
+            put("sshConfig", JSONObject().apply {
+                put("host", "example.com")
+                put("port", 443)
+                put("username", "authorized_audit_user")
+                put("password", "sample_ssh_key_2026")
+                put("serverNameIndicator", "example.com")
+                put("payload", "GET /ws-tunnel HTTP/1.1[crlf]Host: example.com[crlf]Upgrade: websocket[crlf][crlf]")
+                put("proxy", JSONObject().apply {
+                    put("type", "SSL_DIRECT")
+                    put("host", "example.com")
+                    put("port", 443)
+                })
+            })
             put("configVersion", "1.0")
             put("name", "Authorized Diagnostic Sample (.dark)")
             put("protocol", TunnelProtocol.SSH_WS_TLS.name)
