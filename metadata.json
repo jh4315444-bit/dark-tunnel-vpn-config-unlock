@@ -1,0 +1,6 @@
+{
+  "name": "Dark Tunnel Unlocker",
+  "description": "Professional VPN configuration analyzer, cryptographic unlocker, multi-layer decoder, password recovery auditor, config generator, syntax editor, and real Android VpnService tunnel workbench.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
